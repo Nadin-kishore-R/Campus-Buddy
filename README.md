@@ -1149,4 +1149,5 @@ These are useful to know if you plan to extend the codebase:
 8. **No job queue / retry.** Ingestion is in-process via `BackgroundTasks`. A worker restart mid-job leaves the row stuck at `processing`; the `retry_count` field exists but is never incremented.
 #   C a m p u s - B u d d y  
  #   C a m p u s - B u d d y  
+ #   C a m p u s - B u d d y  
  

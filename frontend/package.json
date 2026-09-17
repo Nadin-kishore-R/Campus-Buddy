@@ -1,0 +1,8 @@
+{
+  "name": "campus-ai-frontend",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}

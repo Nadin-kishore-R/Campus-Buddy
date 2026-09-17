@@ -1,0 +1,184 @@
+services:
+  # 1. MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: campus_assistant_mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=${MONGO_DB_NAME:-campus_assistant_db}
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - campus_network
+
+  # 2. MinIO Object Storage
+  minio:
+    image: minio/minio:RELEASE.2023-09-04T19-57-37Z
+    container_name: campus_assistant_minio
+    restart: always
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - campus_network
+
+  # 3. MinIO Bucket Initialization Job
+  createbuckets:
+    image: minio/mc:latest
+    container_name: campus_assistant_minio_init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until /usr/bin/mc alias set myminio http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin}; do
+        echo 'Waiting for MinIO service...';
+        sleep 2;
+      done;
+      /usr/bin/mc mb --ignore-existing myminio/$${MINIO_BUCKET:-campus-documents};
+      /usr/bin/mc anonymous set download myminio/$${MINIO_BUCKET:-campus-documents};
+      echo 'MinIO bucket initialized successfully!';
+      exit 0;
+      "
+    networks:
+      - campus_network
+
+  # 4. Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    container_name: campus_assistant_qdrant
+    restart: always
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - campus_network
+
+  # 5. Ollama LLM Server
+  ollama:
+    image: ollama/ollama:latest
+    container_name: campus_assistant_ollama
+    restart: always
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - campus_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Fallback if no GPU: the deploy section is safely ignored by docker compose if no GPU is present
+
+  # 6. Ollama Model Auto-Puller (runs once, downloads model only if missing)
+  ollama-init:
+    image: curlimages/curl:latest
+    container_name: campus_assistant_ollama_init
+    depends_on:
+      - ollama
+    networks:
+      - campus_network
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Waiting for Ollama service to be ready...';
+      until curl -s -f http://ollama:11434/api/tags > /dev/null 2>&1; do
+        echo 'Ollama not ready yet. Retrying in 2 seconds...';
+        sleep 2;
+      done;
+      echo 'Ollama is ready.';
+      MODEL="${OLLAMA_MODEL:-qwen2.5:3b}";
+      echo \"Checking if model $$MODEL exists in local Ollama storage...\";
+      if curl -s http://ollama:11434/api/tags | grep -q \"\\\"name\\\":\\\"$$MODEL\"; then
+        echo \"Model $$MODEL is already present in persistent volume. Skipping download.\";
+      else
+        echo \"Model $$MODEL not found locally. Pulling from Ollama...\";
+        curl -s -X POST http://ollama:11434/api/pull -d \"{\\\"name\\\": \\\"$$MODEL\\\"}\";
+        echo 'Model pulled successfully!';
+      fi;
+      exit 0;
+      "
+
+  # 7. FastAPI Backend Application
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: campus_assistant_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:5174,http://frontend-user:80,http://frontend-admin:80
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - mongodb
+      - minio
+      - qdrant
+      - ollama
+    networks:
+      - campus_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # 8. React Frontend Application - User
+  frontend-user:
+    build:
+      context: ./frontend
+      dockerfile: apps/user/Dockerfile
+    container_name: campus_assistant_frontend_user
+    restart: always
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      - campus_network
+
+  # 9. React Frontend Application - Admin
+  frontend-admin:
+    build:
+      context: ./frontend
+      dockerfile: apps/admin/Dockerfile
+    container_name: campus_assistant_frontend_admin
+    restart: always
+    ports:
+      - "5174:80"
+    depends_on:
+      - backend
+    networks:
+      - campus_network
+
+networks:
+  campus_network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  minio_data:
+  qdrant_data:
+  ollama_data:
+  hf_cache:
+
